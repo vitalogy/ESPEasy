@@ -3,7 +3,7 @@
 //#######################################################################################################
 
 
-#ifdef PLUGIN_BUILD_NORMAL
+#ifdef PLUGIN_BUILD_TESTING
 
 #include <Wire.h>
 #include <SPI.h>
@@ -152,9 +152,10 @@ boolean Plugin_070(byte function, struct EventStruct *event, String& string)
         int optionValues6[13] = { 0, 1, 2, 3 ,4 ,5, 6, 7, 8, 9, 10, 11, 12 };
         addFormSelector(string, F("Special effects"), F("plugin_070_eff"), 13, options6, optionValues6, choice6);
 
-        addFormSubHeader(string, F("Picture"));
-        addRowLabel(string, F("Test it"));
-        addButton(string, F("/control?cmd=arducam,capture"), F(" > Click < "));
+        addFormSubHeader(string, F("Testing"));
+        addRowLabel(string, F(" "));
+        addButton(string, F("/control?cmd=arducam,capture"), F("Picture"));
+        addButton(string, F("/control?cmd=arducam,stream"), F("Stream"));
         success = true;
         break;
       }
@@ -205,9 +206,9 @@ boolean Plugin_070(byte function, struct EventStruct *event, String& string)
           if (option == F("capture"))
           {
             WiFiClient client = WebServer.client();
+            success = true;
             number_of_pics += 1;
             UserVar[event->BaseVarIndex] = number_of_pics;
-            success = true;
             String log = F("CAM  : Take a picture");
             addLog(LOG_LEVEL_INFO, log);
             uint32_t len = plugin070_start_capture();
@@ -217,16 +218,10 @@ boolean Plugin_070(byte function, struct EventStruct *event, String& string)
               log = F("CAM  : Picture is over size!");
               addLog(LOG_LEVEL_ERROR, log);
             }
-            else if (len == 0 )             //0 kb
+            if (len == 0 )             //0 kb
             {
               log = F("CAM  : Picture size is 0!");
               addLog(LOG_LEVEL_ERROR, log);
-            }
-            else
-            {
-              log = F("CAM  : Length: ");
-              log += len;
-              addLog(LOG_LEVEL_INFO, log);
             }
             myCAM.CS_LOW();
             myCAM.set_fifo_burst(); 
@@ -243,12 +238,12 @@ boolean Plugin_070(byte function, struct EventStruct *event, String& string)
               if ( (temp == 0xD9) && (temp_last == 0xFF) ) //If find the end ,break while,
               {
                 buffer[i++] = temp;  //save the last  0XD9     
+                myCAM.CS_HIGH();
+                if (!client.connected()) break;
                 //Write the remain bytes in the buffer
-                //if (!client.connected()) break;
                 client.write(&buffer[0], i);
                 is_header = false;
                 i = 0;
-                myCAM.CS_HIGH();
                 break; 
               }
               if (is_header == true)
@@ -259,7 +254,7 @@ boolean Plugin_070(byte function, struct EventStruct *event, String& string)
                 else
                 {
                   //Write bufferSize bytes image data to file
-                  //if (!client.connected()) break;
+                  if (!client.connected()) break;
                   client.write(&buffer[0], bufferSize);
                   i = 0;
                   buffer[i++] = temp;
@@ -272,6 +267,75 @@ boolean Plugin_070(byte function, struct EventStruct *event, String& string)
                 buffer[i++] = temp;
               }
             } 
+          }
+          if (option == F("stream"))
+          {
+            WiFiClient client = WebServer.client();
+            success = true;
+            String log = F("CAM  : Streaming");
+            addLog(LOG_LEVEL_INFO, log);
+
+            String response = "HTTP/1.1 200 OK\r\n";
+            response += "Content-Type: multipart/x-mixed-replace; boundary=frame\r\n\r\n";
+            WebServer.sendContent(response);
+            while (1)
+            {
+              uint32_t len = plugin070_start_capture();
+              if (len >= MAX_FIFO_SIZE)   // 8M
+              {
+                log = F("CAM  : Picture is over size!");
+                addLog(LOG_LEVEL_ERROR, log);
+              }
+              if (len == 0 )             //0 kb
+              {
+                log = F("CAM  : Picture size is 0!");
+                addLog(LOG_LEVEL_ERROR, log);
+              }
+              myCAM.CS_LOW();
+              myCAM.set_fifo_burst();
+              if (!client.connected()) break;
+              response = "--frame\r\n";
+              response += "Content-Type: image/jpeg\r\n\r\n";
+              WebServer.sendContent(response);
+              while ( len-- )
+              {
+                temp_last = temp;
+                temp =  SPI.transfer(0x00);
+                //Read JPEG data from FIFO
+                if ( (temp == 0xD9) && (temp_last == 0xFF) ) //If find the end ,break while,
+                {
+                  buffer[i++] = temp;  //save the last  0XD9     
+                  //Write the remain bytes in the buffer
+                  myCAM.CS_HIGH();
+                  if (!client.connected()) break;
+                  client.write(&buffer[0], i);
+                  is_header = false;
+                  i = 0;
+                  break; 
+                }
+                if (is_header == true)
+                { 
+                  //Write image data to buffer if not full
+                  if (i < bufferSize)
+                    buffer[i++] = temp;
+                  else
+                  {
+                    //Write bufferSize bytes image data to file
+                    //if (!client.connected()) break;
+                    client.write(&buffer[0], bufferSize);
+                    i = 0;
+                    buffer[i++] = temp;
+                  }        
+                }
+                else if ((temp == 0xD8) & (temp_last == 0xFF))
+                {
+                  is_header = true;
+                  buffer[i++] = temp_last;
+                  buffer[i++] = temp;
+                }
+              }
+              if (!client.connected()) break;
+            }
           }
           if (option == F("res"))
           {
@@ -432,18 +496,10 @@ void plugin070_set_cam_special_effects(uint8_t e)
 
 uint32_t plugin070_start_capture()
 {
-  //myCAM.flush_fifo();
+  myCAM.flush_fifo();
   myCAM.clear_fifo_flag();
   myCAM.start_capture();
-
-  int total_time = millis();
   while (!myCAM.get_bit(ARDUCHIP_TRIG, CAP_DONE_MASK));
-  total_time = millis() - total_time;
-  String log = F("CAM  : Capture time ");
-  log += total_time;
-  log += F("ms");
-  addLog(LOG_LEVEL_INFO, log);
-
   uint32_t len  = myCAM.read_fifo_length();
   return len;
 }
